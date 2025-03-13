@@ -18,12 +18,12 @@ import './shims/global';
 import './protocol/validator';
 
 import { DispatcherConnection, RootDispatcher } from 'playwright-core/lib/server';
+import { CrxConnection } from './client/crxConnection';
 import type { CrxPlaywright as CrxPlaywrightAPI } from './client/crxPlaywright';
 import { CrxPlaywright } from './server/crxPlaywright';
 import { CrxPlaywrightDispatcher } from './server/dispatchers/crxPlaywrightDispatcher';
 import { PageBinding } from 'playwright-core/lib/server/page';
 import { wrapClientApis } from './client/crxZone';
-import type { Connection } from 'playwright-core/lib/client/connection';
 
 export { debug as _debug } from 'debug';
 export { setUnderTest as _setUnderTest, isUnderTest as _isUnderTest } from 'playwright-core/lib/utils';
@@ -34,7 +34,7 @@ PageBinding.kPlaywrightBinding = '__crx__binding__';
 function getCurrentTime(): string {
   const now = new Date();
   const year = now.getFullYear().toString();
-  const month = (now.getMonth() + 1).toString().padStart(2, '0'); // 月份从0开始
+  const month = (now.getMonth() + 1).toString().padStart(2, '0');
   const day = now.getDate().toString().padStart(2, '0');
   const hours = now.getHours().toString().padStart(2, '0');
   const minutes = now.getMinutes().toString().padStart(2, '0');
@@ -43,20 +43,65 @@ function getCurrentTime(): string {
   return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}.${milliseconds}`;
 }
 
+// 本地模式相关变量
+let playwright: CrxPlaywright | null = null;
+let clientConnection: CrxConnection | null = null;
+let dispatcherConnection: DispatcherConnection | null = null;
+let rootScope: RootDispatcher | null = null;
+let localPlaywrightAPI: CrxPlaywrightAPI | null = null;
+
+// 初始化本地模式
+function initializeLocalMode(): CrxPlaywrightAPI {
+  if (localPlaywrightAPI)
+    return localPlaywrightAPI;
+
+  playwright = new CrxPlaywright();
+  clientConnection = new CrxConnection();
+  dispatcherConnection = new DispatcherConnection(true /* local */);
+
+  // Dispatch synchronously at first.
+  dispatcherConnection.onmessage = message => clientConnection!.dispatch(message);
+  clientConnection.onmessage = message => dispatcherConnection!.dispatch(message);
+
+  rootScope = new RootDispatcher(dispatcherConnection);
+
+  // Initialize Playwright channel.
+  new CrxPlaywrightDispatcher(rootScope, playwright);
+  localPlaywrightAPI = clientConnection.getObjectWithKnownName('Playwright') as CrxPlaywrightAPI;
+
+  // Switch to async dispatch after we got Playwright object.
+  dispatcherConnection.onmessage = message => setImmediate(() => clientConnection!.dispatch(message));
+  clientConnection.onmessage = message => setImmediate(() => dispatcherConnection!.dispatch(message));
+
+  clientConnection.toImpl = (x: any) => x ? dispatcherConnection!._dispatchers.get(x._guid)!._object : dispatcherConnection!._dispatchers.get('');
+  (localPlaywrightAPI as any)._toImpl = clientConnection.toImpl;
+
+  return localPlaywrightAPI;
+}
+
+// 清理本地模式
+function cleanupLocalMode() {
+  playwright = null;
+  clientConnection = null;
+  dispatcherConnection = null;
+  rootScope = null;
+  localPlaywrightAPI = null;
+}
+
+// WebSocket 客户端实现
 class PlaywrightWebSocketClient {
   private ws: WebSocket;
   private dispatcherConnection: DispatcherConnection;
   private rootDispatcher: RootDispatcher;
   private playwright: CrxPlaywright;
-  private playwrightAPI: CrxPlaywrightAPI | null = null;
   private initialized = false;
-  private crxPlaywrightDispatcher: CrxPlaywrightDispatcher | null = null;
 
   constructor(wsUrl: string = 'ws://localhost:8000/ws/playwright') {
     this.ws = new WebSocket(wsUrl);
     this.playwright = new CrxPlaywright();
     this.dispatcherConnection = new DispatcherConnection(true /* local */);
     this.rootDispatcher = new RootDispatcher(this.dispatcherConnection);
+    new CrxPlaywrightDispatcher(this.rootDispatcher, this.playwright);
 
     // 设置消息处理
     this.dispatcherConnection.onmessage = message => {
@@ -68,7 +113,7 @@ class PlaywrightWebSocketClient {
     };
   }
 
-  async connect(): Promise<CrxPlaywrightAPI> {
+  async connect(): Promise<void> {
     return new Promise((resolve, reject) => {
       this.ws.addEventListener('open', () => {
         console.log('Connected to server');
@@ -79,34 +124,14 @@ class PlaywrightWebSocketClient {
           const message = JSON.parse(event.data.toString());
           console.log(`[${getCurrentTime()}] Received message from server:`, message);
 
-          // 如果是 initialize 消息，创建 CrxPlaywrightDispatcher
-          if (message.method === 'initialize' && !this.initialized) {
-            try {
-              this.crxPlaywrightDispatcher = new CrxPlaywrightDispatcher(this.rootDispatcher, this.playwright);
-              this.initialized = true;
-            } catch (error) {
-              reject(error);
-              return;
-            }
-          }
-
           // 分发消息
           this.dispatcherConnection.dispatch(message);
 
           // 如果收到 initialize 消息的响应（没有错误），说明初始化成功
-          if (message.id === 1 && !message.error && this.initialized) {
-            try {
-              this.playwrightAPI = this.getPlaywrightAPI();
-              if (this.playwrightAPI)
-                resolve(this.playwrightAPI);
-              else
-                reject(new Error('Failed to get Playwright API'));
-            } catch (error) {
-              reject(error);
-            }
-          } else if (message.error) {
+          if (message.id === 1 && !message.error && !this.initialized)
+            this.initialized = true;
+          else if (message.error)
             reject(new Error(`Server error: ${message.error.error.message}`));
-          }
         } catch (error) {
           console.error(`[${getCurrentTime()}] Error processing message:`, error);
           if (!this.initialized)
@@ -129,24 +154,6 @@ class PlaywrightWebSocketClient {
     });
   }
 
-  private getPlaywrightAPI(): CrxPlaywrightAPI {
-    // 尝试获取Playwright对象
-    const connection = this.dispatcherConnection as unknown as Connection;
-    const api = connection._objects.get('Playwright') as CrxPlaywrightAPI;
-    if (!api)
-      throw new Error('Playwright API not ready yet');
-
-    // 设置toImpl方法
-    (api as any)._toImpl = (x: any) => {
-      if (x)
-        return this.dispatcherConnection._dispatchers.get(x._guid)!._object;
-      else
-        return this.dispatcherConnection._dispatchers.get('');
-    };
-
-    return api;
-  }
-
   async cleanup(): Promise<void> {
     try {
       if (this.ws.readyState === WebSocket.OPEN)
@@ -157,37 +164,44 @@ class PlaywrightWebSocketClient {
   }
 }
 
-// 导出API
-let playwrightAPI: CrxPlaywrightAPI | null = null;
-let client: PlaywrightWebSocketClient | null = null;
+// 导出 WebSocket 客户端相关函数
+let wsClient: PlaywrightWebSocketClient | null = null;
 
-// 导出连接函数
-export async function connectToPlaywrightServer(wsUrl: string): Promise<CrxPlaywrightAPI> {
-  if (playwrightAPI)
-    return playwrightAPI;
+export async function connectToPlaywrightServer(wsUrl: string): Promise<void> {
+  if (wsClient)
+    return;
 
-  client = new PlaywrightWebSocketClient(wsUrl);
+  wsClient = new PlaywrightWebSocketClient(wsUrl);
   try {
-    playwrightAPI = await client.connect();
+    await wsClient.connect();
     console.log(`[${getCurrentTime()}]` + 'Playwright WebSocket client is running...');
-    return playwrightAPI;
   } catch (error) {
     console.error(`[${getCurrentTime()}] Failed to start client:`, error);
     throw error;
   }
 }
 
-// 导出清理函数
-export async function disconnectFromPlaywrightServer(): Promise<void> {
-  if (client) {
-    await client.cleanup();
-    client = null;
-  }
-  playwrightAPI = null;
-}
+// 导出可空的 API
+export let crx: CrxPlaywrightAPI['_crx'] | null = null;
+export let selectors: CrxPlaywrightAPI['selectors'] | null = null;
+export let errors: CrxPlaywrightAPI['errors'] | null = null;
+export let default_api: CrxPlaywrightAPI | null = null;
 
-// 使用可选链操作符避免在playwrightAPI为null时出错
-export const { _crx: crx, selectors, errors } = {} as CrxPlaywrightAPI;
-export default null;
+// 监听模式切换
+export function setWebSocketMode(enabled: boolean) {
+  if (!enabled) {
+    // 切换到本地模式
+    const api = initializeLocalMode();
+    ({ _crx: crx, selectors, errors } = api);
+    default_api = api;
+  } else {
+    // 切换到 WebSocket 模式，清空本地 API
+    cleanupLocalMode();
+    crx = null;
+    selectors = null;
+    errors = null;
+    default_api = null;
+  }
+}
 
 wrapClientApis();
