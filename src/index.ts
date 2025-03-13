@@ -50,15 +50,15 @@ class PlaywrightWebSocketClient {
   private playwright: CrxPlaywright;
   private playwrightAPI: CrxPlaywrightAPI | null = null;
   private initialized = false;
+  private crxPlaywrightDispatcher: CrxPlaywrightDispatcher | null = null;
 
   constructor(wsUrl: string = 'ws://localhost:8000/ws/playwright') {
-    // 使用浏览器原生WebSocket
     this.ws = new WebSocket(wsUrl);
     this.playwright = new CrxPlaywright();
     this.dispatcherConnection = new DispatcherConnection(true /* local */);
     this.rootDispatcher = new RootDispatcher(this.dispatcherConnection);
 
-    // 设置消息处理 - 从本地发送到服务器
+    // 设置消息处理
     this.dispatcherConnection.onmessage = message => {
       console.log(`[${getCurrentTime()}]` + 'Sending message to server:', message);
       if (this.ws.readyState === WebSocket.OPEN)
@@ -70,9 +70,6 @@ class PlaywrightWebSocketClient {
 
   async connect(): Promise<CrxPlaywrightAPI> {
     return new Promise((resolve, reject) => {
-      let createMessagesReceived = 0;
-      const requiredCreateMessages = 2; // 等待两个 __create__ 消息
-
       this.ws.addEventListener('open', () => {
         console.log('Connected to server');
       });
@@ -82,30 +79,38 @@ class PlaywrightWebSocketClient {
           const message = JSON.parse(event.data.toString());
           console.log(`[${getCurrentTime()}] Received message from server:`, message);
 
-          // 如果是 __create__ 消息，先处理它
-          if (message.method === 'initialize') {
-            // 初始化Playwright channel
-            new CrxPlaywrightDispatcher(this.rootDispatcher, this.playwright);
-            createMessagesReceived++;
-            this.dispatcherConnection.dispatch(message);
-
-            // 当收到所需的 __create__ 消息后，执行初始化
-            if (createMessagesReceived === requiredCreateMessages && !this.initialized) {
+          // 如果是 initialize 消息，创建 CrxPlaywrightDispatcher
+          if (message.method === 'initialize' && !this.initialized) {
+            try {
+              this.crxPlaywrightDispatcher = new CrxPlaywrightDispatcher(this.rootDispatcher, this.playwright);
               this.initialized = true;
-              try {
-                this.rootDispatcher.initialize({ sdkLanguage: 'python' });
-                this.playwrightAPI = this.getPlaywrightAPI();
-                resolve(this.playwrightAPI);
-              } catch (error) {
-                reject(error);
-              }
+            } catch (error) {
+              reject(error);
+              return;
             }
-          } else {
-            // 处理其他消息
-            this.dispatcherConnection.dispatch(message);
+          }
+
+          // 分发消息
+          this.dispatcherConnection.dispatch(message);
+
+          // 如果收到 initialize 消息的响应（没有错误），说明初始化成功
+          if (message.id === 1 && !message.error && this.initialized) {
+            try {
+              this.playwrightAPI = this.getPlaywrightAPI();
+              if (this.playwrightAPI)
+                resolve(this.playwrightAPI);
+              else
+                reject(new Error('Failed to get Playwright API'));
+            } catch (error) {
+              reject(error);
+            }
+          } else if (message.error) {
+            reject(new Error(`Server error: ${message.error.error.message}`));
           }
         } catch (error) {
           console.error(`[${getCurrentTime()}] Error processing message:`, error);
+          if (!this.initialized)
+            reject(error);
         }
       });
 
@@ -118,13 +123,14 @@ class PlaywrightWebSocketClient {
       this.ws.addEventListener('close', () => {
         console.log(`[${getCurrentTime()}] Disconnected from server`);
         this.cleanup();
+        if (!this.initialized)
+          reject(new Error('Connection closed before initialization'));
       });
     });
   }
 
   private getPlaywrightAPI(): CrxPlaywrightAPI {
     // 尝试获取Playwright对象
-    // 使用Connection的方法获取对象
     const connection = this.dispatcherConnection as unknown as Connection;
     const api = connection._objects.get('Playwright') as CrxPlaywrightAPI;
     if (!api)
@@ -143,7 +149,6 @@ class PlaywrightWebSocketClient {
 
   async cleanup(): Promise<void> {
     try {
-      // 手动清理资源
       if (this.ws.readyState === WebSocket.OPEN)
         this.ws.close();
     } catch (error) {
@@ -152,35 +157,37 @@ class PlaywrightWebSocketClient {
   }
 }
 
-// 创建客户端实例
-const client = new PlaywrightWebSocketClient();
-
 // 导出API
 let playwrightAPI: CrxPlaywrightAPI | null = null;
+let client: PlaywrightWebSocketClient | null = null;
 
-// 连接到服务器并获取API
-client.connect().then(api => {
-  playwrightAPI = api;
-  console.log(`[${getCurrentTime()}]` + 'Playwright WebSocket client is running...');
+// 导出连接函数
+export async function connectToPlaywrightServer(wsUrl: string): Promise<CrxPlaywrightAPI> {
+  if (playwrightAPI)
+    return playwrightAPI;
 
-  // 处理进程退出（仅在Node.js环境中有效）
-  if (typeof process !== 'undefined' && process.on) {
-    process.on('SIGINT', async () => {
-      console.log(`[${getCurrentTime()}]` + 'Received SIGINT. Cleaning up...');
-      await client.cleanup();
-      process.exit(0);
-    });
+  client = new PlaywrightWebSocketClient(wsUrl);
+  try {
+    playwrightAPI = await client.connect();
+    console.log(`[${getCurrentTime()}]` + 'Playwright WebSocket client is running...');
+    return playwrightAPI;
+  } catch (error) {
+    console.error(`[${getCurrentTime()}] Failed to start client:`, error);
+    throw error;
   }
-}).catch(error => {
-  console.error(`[${getCurrentTime()}] Failed to start client:`, error);
-  // 仅在Node.js环境中退出进程
-  if (typeof process !== 'undefined' && process.exit)
-    process.exit(1);
+}
 
-});
+// 导出清理函数
+export async function disconnectFromPlaywrightServer(): Promise<void> {
+  if (client) {
+    await client.cleanup();
+    client = null;
+  }
+  playwrightAPI = null;
+}
 
 // 使用可选链操作符避免在playwrightAPI为null时出错
-export const { _crx: crx, selectors, errors } = playwrightAPI || {} as CrxPlaywrightAPI;
-export default playwrightAPI;
+export const { _crx: crx, selectors, errors } = {} as CrxPlaywrightAPI;
+export default null;
 
 wrapClientApis();
