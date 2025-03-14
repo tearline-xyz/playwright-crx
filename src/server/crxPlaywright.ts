@@ -21,7 +21,7 @@ export class CrxPlaywright extends Playwright {
   readonly _crx: Crx;
 
   constructor() {
-    super({ sdkLanguage: 'javascript' });
+    super({ sdkLanguage: 'python' });
     this._crx = new Crx(this);
   }
 }
