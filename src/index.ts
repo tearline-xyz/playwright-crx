@@ -101,7 +101,6 @@ class PlaywrightWebSocketClient {
     this.playwright = new CrxPlaywright();
     this.dispatcherConnection = new DispatcherConnection(true /* local */);
     this.rootDispatcher = new RootDispatcher(this.dispatcherConnection);
-    new CrxPlaywrightDispatcher(this.rootDispatcher, this.playwright);
 
     // 设置消息处理
     this.dispatcherConnection.onmessage = message => {
@@ -117,6 +116,7 @@ class PlaywrightWebSocketClient {
     return new Promise((resolve, reject) => {
       this.ws.addEventListener('open', () => {
         console.log('Connected to server');
+        resolve();
       });
 
       this.ws.addEventListener('message', (event: MessageEvent) => {
@@ -124,14 +124,24 @@ class PlaywrightWebSocketClient {
           const message = JSON.parse(event.data.toString());
           console.log(`[${getCurrentTime()}] Received message from server:`, message);
 
-          // 分发消息
-          this.dispatcherConnection.dispatch(message);
+          // 如果是 __create__ 消息，先处理它
+          if (message.method === 'initialize' && !this.initialized) {
+            // 初始化Playwright channel
+            new CrxPlaywrightDispatcher(this.rootDispatcher, this.playwright);
+            this.dispatcherConnection.dispatch(message);
 
-          // 如果收到 initialize 消息的响应（没有错误），说明初始化成功
-          if (message.id === 1 && !message.error && !this.initialized)
+            // 当收到所需的 __create__ 消息后，执行初始化
             this.initialized = true;
-          else if (message.error)
-            reject(new Error(`Server error: ${message.error.error.message}`));
+            try {
+              this.rootDispatcher.initialize({ sdkLanguage: 'python' });
+              resolve();
+            } catch (error) {
+              reject(error);
+            }
+          } else {
+            // 处理其他消息
+            this.dispatcherConnection.dispatch(message);
+          }
         } catch (error) {
           console.error(`[${getCurrentTime()}] Error processing message:`, error);
           if (!this.initialized)
