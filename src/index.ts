@@ -17,6 +17,7 @@
 import './shims/global';
 import './protocol/validator';
 
+import type { PlaywrightDispatcher } from 'playwright-core/lib/server';
 import { DispatcherConnection, RootDispatcher } from 'playwright-core/lib/server';
 import { CrxConnection } from './client/crxConnection';
 import type { CrxPlaywright as CrxPlaywrightAPI } from './client/crxPlaywright';
@@ -24,6 +25,7 @@ import { CrxPlaywright } from './server/crxPlaywright';
 import { CrxPlaywrightDispatcher } from './server/dispatchers/crxPlaywrightDispatcher';
 import { PageBinding } from 'playwright-core/lib/server/page';
 import { wrapClientApis } from './client/crxZone';
+import type { RootInitializeParams } from '@protocol/channels';
 
 export { debug as _debug } from 'debug';
 export { setUnderTest as _setUnderTest, isUnderTest as _isUnderTest } from 'playwright-core/lib/utils';
@@ -100,8 +102,10 @@ class PlaywrightWebSocketClient {
     this.ws = new WebSocket(wsUrl);
     this.playwright = new CrxPlaywright();
     this.dispatcherConnection = new DispatcherConnection(true /* local */);
-    this.rootDispatcher = new RootDispatcher(this.dispatcherConnection);
-
+    this.rootDispatcher = new RootDispatcher(this.dispatcherConnection, async (rootScope: RootDispatcher, options: RootInitializeParams) => {
+      const dispatcher = new CrxPlaywrightDispatcher(rootScope, this.playwright);
+      return dispatcher as PlaywrightDispatcher;
+    });
     // 设置消息处理
     this.dispatcherConnection.onmessage = message => {
       console.log(`[${getCurrentTime()}]` + 'Sending message to server:', message);
@@ -119,28 +123,22 @@ class PlaywrightWebSocketClient {
         resolve();
       });
 
-      this.ws.addEventListener('message', (event: MessageEvent) => {
+      this.ws.addEventListener('message', async (event: MessageEvent) => {
         try {
           const message = JSON.parse(event.data.toString());
           console.log(`[${getCurrentTime()}] Received message from server:`, message);
 
           // 如果是 __create__ 消息，先处理它
           if (message.method === 'initialize' && !this.initialized) {
-            // 初始化Playwright channel
-            new CrxPlaywrightDispatcher(this.rootDispatcher, this.playwright);
-            this.dispatcherConnection.dispatch(message);
-
-            // 当收到所需的 __create__ 消息后，执行初始化
-            this.initialized = true;
             try {
-              this.rootDispatcher.initialize({ sdkLanguage: 'python' });
-              resolve();
+              await this.dispatcherConnection.dispatch(message);
+              this.initialized = true;
             } catch (error) {
               reject(error);
             }
           } else {
             // 处理其他消息
-            this.dispatcherConnection.dispatch(message);
+            await this.dispatcherConnection.dispatch(message);
           }
         } catch (error) {
           console.error(`[${getCurrentTime()}] Error processing message:`, error);
