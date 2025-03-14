@@ -72,8 +72,14 @@ function initializeLocalMode(): CrxPlaywrightAPI {
   localPlaywrightAPI = clientConnection.getObjectWithKnownName('Playwright') as CrxPlaywrightAPI;
 
   // Switch to async dispatch after we got Playwright object.
-  dispatcherConnection.onmessage = message => setImmediate(() => clientConnection!.dispatch(message));
-  clientConnection.onmessage = message => setImmediate(() => dispatcherConnection!.dispatch(message));
+  dispatcherConnection.onmessage = message => {
+    console.log('dispatcherConnection received then clientConnection dispath message:', message);
+    setImmediate(() => clientConnection!.dispatch(message));
+  };
+  clientConnection.onmessage = message => {
+    console.log('clientConnection received then dispatcherConnection dispath message:', message);
+    setImmediate(() => dispatcherConnection!.dispatch(message));
+  };
 
   clientConnection.toImpl = (x: any) => x ? dispatcherConnection!._dispatchers.get(x._guid)!._object : dispatcherConnection!._dispatchers.get('');
   (localPlaywrightAPI as any)._toImpl = clientConnection.toImpl;
