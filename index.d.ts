@@ -26,3 +26,5 @@ export const _debug: {
   enabled(namespaces: string): boolean;
   disable(): void;
 };
+
+export function connectToPlaywrightServer(url: string): Promise<void>;
