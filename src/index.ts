@@ -182,8 +182,10 @@ class PlaywrightWebSocketClient {
 let wsClient: PlaywrightWebSocketClient | null = null;
 
 export async function connectToPlaywrightServer(wsUrl: string): Promise<void> {
-  if (wsClient)
-    return;
+  if (wsClient) {
+    await wsClient.cleanup();
+    wsClient = null;
+  }
 
   wsClient = new PlaywrightWebSocketClient(wsUrl);
   try {
@@ -191,6 +193,7 @@ export async function connectToPlaywrightServer(wsUrl: string): Promise<void> {
     console.log(`[${getCurrentTime()}]` + 'Playwright WebSocket client is running...');
   } catch (error) {
     console.error(`[${getCurrentTime()}] Failed to start client:`, error);
+    wsClient = null; // Make sure to reset on error
     throw error;
   }
 }
