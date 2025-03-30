@@ -114,25 +114,25 @@ class PlaywrightWebSocketClient {
     });
     // 设置消息处理
     this.dispatcherConnection.onmessage = message => {
-      console.log(`[${getCurrentTime()}]` + 'Sending message to server:', message);
+      console.log(`[${getCurrentTime()}] Sending message to websocket server:`, message);
       if (this.ws.readyState === WebSocket.OPEN)
         this.ws.send(JSON.stringify(message));
       else
-        console.error(`[${getCurrentTime()}]` + 'WebSocket not ready, message dropped:', message);
+        console.error(`[${getCurrentTime()}] WebSocket not ready(readyState: ${this.ws.readyState}), message dropped:`, message);
     };
   }
 
   async connect(): Promise<void> {
     return new Promise((resolve, reject) => {
       this.ws.addEventListener('open', () => {
-        console.log('Connected to server');
+        console.log(`[${getCurrentTime()}] Connected to websocket server`);
         resolve();
       });
 
       this.ws.addEventListener('message', async (event: MessageEvent) => {
         try {
           const message = JSON.parse(event.data.toString());
-          console.log(`[${getCurrentTime()}] Received message from server:`, message);
+          console.log(`[${getCurrentTime()}] Received message from websocket server:`, message);
 
           // 如果是 __create__ 消息，先处理它
           if (message.method === 'initialize' && !this.initialized) {
@@ -160,7 +160,7 @@ class PlaywrightWebSocketClient {
       });
 
       this.ws.addEventListener('close', () => {
-        console.log(`[${getCurrentTime()}] Disconnected from server`);
+        console.log(`[${getCurrentTime()}] Disconnected from websocket server`);
         this.cleanup();
         if (!this.initialized)
           reject(new Error('Connection closed before initialization'));
