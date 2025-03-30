@@ -103,9 +103,11 @@ class PlaywrightWebSocketClient {
   private rootDispatcher: RootDispatcher;
   private playwright: CrxPlaywright;
   private initialized = false;
+  private onDisconnectCallback?: () => void;
 
-  constructor(wsUrl: string = 'ws://localhost:8000/ws/playwright') {
+  constructor(wsUrl: string = 'ws://localhost:8000/ws/playwright', onDisconnect?: () => void) {
     this.ws = new WebSocket(wsUrl);
+    this.onDisconnectCallback = onDisconnect;
     this.playwright = new CrxPlaywright();
     this.dispatcherConnection = new DispatcherConnection(true /* local */);
     this.rootDispatcher = new RootDispatcher(this.dispatcherConnection, async (rootScope: RootDispatcher, options: RootInitializeParams) => {
@@ -162,6 +164,9 @@ class PlaywrightWebSocketClient {
       this.ws.addEventListener('close', () => {
         console.log(`[${getCurrentTime()}] Disconnected from websocket server`);
         this.cleanup();
+        if (this.onDisconnectCallback)
+          this.onDisconnectCallback();
+
         if (!this.initialized)
           reject(new Error('Connection closed before initialization'));
       });
@@ -186,17 +191,17 @@ export async function disconnectFromPlaywrightServer(): Promise<void> {
   if (wsClient) {
     await wsClient.cleanup();
     wsClient = null;
-    console.log(`[${getCurrentTime()}]` + 'Playwright WebSocket client disconnected');
+    console.log(`[${getCurrentTime()}] Playwright WebSocket client disconnected`);
   }
 }
 
-export async function connectToPlaywrightServer(wsUrl: string): Promise<void> {
+export async function connectToPlaywrightServer(wsUrl: string, onDisconnect?: () => void): Promise<void> {
   await disconnectFromPlaywrightServer();
 
-  wsClient = new PlaywrightWebSocketClient(wsUrl);
+  wsClient = new PlaywrightWebSocketClient(wsUrl, onDisconnect);
   try {
     await wsClient.connect();
-    console.log(`[${getCurrentTime()}]` + 'Playwright WebSocket client is running...');
+    console.log(`[${getCurrentTime()}] Playwright WebSocket client is running...`);
   } catch (error) {
     console.error(`[${getCurrentTime()}] Failed to start client:`, error);
     wsClient = null; // Make sure to reset on error
