@@ -27,4 +27,4 @@ export const _debug: {
   disable(): void;
 };
 
-export function connectToPlaywrightServer(url: string): Promise<void>;
+// export function connectToPlaywrightServer(url: string): Promise<void>;

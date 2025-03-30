@@ -181,11 +181,17 @@ class PlaywrightWebSocketClient {
 // 导出 WebSocket 客户端相关函数
 let wsClient: PlaywrightWebSocketClient | null = null;
 
-export async function connectToPlaywrightServer(wsUrl: string): Promise<void> {
+// disconnect and reset the client
+export async function disconnectFromPlaywrightServer(): Promise<void> {
   if (wsClient) {
     await wsClient.cleanup();
     wsClient = null;
+    console.log(`[${getCurrentTime()}]` + 'Playwright WebSocket client disconnected');
   }
+}
+
+export async function connectToPlaywrightServer(wsUrl: string): Promise<void> {
+  await disconnectFromPlaywrightServer();
 
   wsClient = new PlaywrightWebSocketClient(wsUrl);
   try {
